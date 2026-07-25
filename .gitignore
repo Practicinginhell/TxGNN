@@ -127,3 +127,17 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Trained model checkpoints
+saved_models/
+model_ckpt_mini/
+
+# Downloaded knowledge graph + generated subsets and splits (many GB - do not commit).
+# Everything under data/ is generated except the checked-in disease_files/.
+data_full/
+data_mini/
+data/*
+!data/disease_files/
+
+# Editor settings
+.vscode/
