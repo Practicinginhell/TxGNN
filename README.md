@@ -106,20 +106,20 @@ result = TxEval(model = TxGNN).eval_disease_centric(disease_idxs = [2176.0],
 ranked = result['Ranked List'].iloc[0]   # drug names, best first
 ```
 
-Three things that trip people up:
+A few things to keep in mind:
 
-- With `relation` given you get a **DataFrame**, and with `relation = None` you get a **dict**
-  keyed `rev_indication` / `rev_contraindication` / `rev_off-label use`. The `rev_` prefix is
-  because a query runs disease → drug, the reverse of the stored edge.
-- The returned rows are indexed by disease **ID**, not the `x_idx` you passed in. Match on
-  the `Name` column, or use positional order (it follows your input list).
-- `eval_disease_centric` scores against ground truth, so `AUROC = -1` means metrics were
-  undefined for that disease (no known drugs in the split). The `Ranked List` is still
-  produced. For deployment queries use `split = 'full_graph'`, which trains on the whole
-  graph and skips the metric machinery.
-
-Disease indices are re-derived from whichever KG you load, so an index valid for the full KG
-will point elsewhere in the mini KG. Always look it up by name.
+- The output format depends on `relation`.
+  - `relation='indication'` returns a single DataFrame.
+  - `relation=None` returns a dictionary of DataFrames (e.g. `rev_indication`,
+    `rev_contraindication`, `rev_off-label use`). The `rev_` prefix indicates a
+    disease → drug query, the reverse of the stored drug → disease edges.
+- Don't rely on the DataFrame index. Match results using the `Name` column or the row
+  order, which follows your input list.
+- `eval_disease_centric()` is for evaluation. `AUROC = -1` means the metric could not be
+  computed for that disease (e.g. no known drugs in the evaluation split), but the
+  `Ranked List` is still generated. For prediction only, use `split='full_graph'`.
+- Disease indices are graph-specific, so the same disease has a different index in the
+  full and mini KG. IDs stay stable, but looking up by name is the safe habit.
 
 ### Tests
 
