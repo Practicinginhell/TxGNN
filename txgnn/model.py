@@ -16,14 +16,15 @@ import random
 import warnings
 warnings.filterwarnings("ignore")
 from .utils import sim_matrix, exponential, obtain_disease_profile, obtain_protein_random_walk_profile, convert2str
+from .init_schemes import resolve_init_spec, init_linear_
 from .graphmask.multiple_inputs_layernorm_linear import MultipleInputsLayernormLinear
 from .graphmask.squeezer import Squeezer
 from .graphmask.sigmoid_penalty import SoftConcrete
 
 class DistMultPredictor(nn.Module):
-    def __init__(self, n_hid, w_rels, G, rel2idx, proto, proto_num, sim_measure, bert_measure, agg_measure, num_walks, walk_mode, path_length, split, data_folder, exp_lambda, device):
+    def __init__(self, n_hid, w_rels, G, rel2idx, proto, proto_num, sim_measure, bert_measure, agg_measure, num_walks, walk_mode, path_length, split, data_folder, exp_lambda, device, init_scheme = None):
         super().__init__()
-        
+
         self.proto = proto
         self.sim_measure = sim_measure
         self.bert_measure = bert_measure
@@ -46,10 +47,11 @@ class DistMultPredictor(nn.Module):
         self.node_types_dd = ['disease', 'drug']
         
         if proto:
+            gate_init = resolve_init_spec(init_scheme)['gate']
             self.W_gate = {}
             for i in self.node_types_dd:
                 temp_w = nn.Linear(n_hid * 2, 1)
-                nn.init.xavier_uniform_(temp_w.weight)
+                init_linear_(temp_w, gate_init)
                 self.W_gate[i] = temp_w.to(self.device)
             self.k = proto_num
             self.m = nn.Sigmoid()
@@ -296,16 +298,21 @@ class DistMultPredictor(nn.Module):
 
     
 class AttHeteroRGCNLayer(nn.Module):
-    def __init__(self, in_size, out_size, etypes):
+    def __init__(self, in_size, out_size, etypes, init_scheme = None):
         super(AttHeteroRGCNLayer, self).__init__()
         self.weight = nn.ModuleDict({
                 name : nn.Linear(in_size, out_size) for name in etypes
             })
-        
+
         self.attn_fc = nn.ModuleDict({
                 name : nn.Linear(out_size * 2, 1, bias = False) for name in etypes
             })
-    
+
+        layer_init = resolve_init_spec(init_scheme)['layer']
+        for name in etypes:
+            init_linear_(self.weight[name], layer_init)
+            init_linear_(self.attn_fc[name], layer_init)
+
     def edge_attention(self, edges):
         src_type = edges._etype[0]
         etype = edges._etype[1]
@@ -371,11 +378,16 @@ class AttHeteroRGCNLayer(nn.Module):
             return {ntype : G.dstdata['h'][ntype] for ntype in list(G.dstdata['h'].keys())}, att
     
 class HeteroRGCNLayer(nn.Module):
-    def __init__(self, in_size, out_size, etypes):
+    def __init__(self, in_size, out_size, etypes, init_scheme = None):
         super(HeteroRGCNLayer, self).__init__()
         self.weight = nn.ModuleDict({
                 name : nn.Linear(in_size, out_size) for name in etypes
             })
+
+        layer_init = resolve_init_spec(init_scheme)['layer']
+        for name in etypes:
+            init_linear_(self.weight[name], layer_init)
+
         self.in_size = in_size
         self.out_size = out_size
             
@@ -476,21 +488,24 @@ class HeteroRGCNLayer(nn.Module):
         return {ntype : G.nodes[ntype].data['h'] for ntype in G.ntypes}, penalty, self.num_masked
     
 class HeteroRGCN(nn.Module):
-    def __init__(self, G, in_size, hidden_size, out_size, attention, proto, proto_num, sim_measure, bert_measure, agg_measure, num_walks, walk_mode, path_length, split, data_folder, exp_lambda, device):
+    def __init__(self, G, in_size, hidden_size, out_size, attention, proto, proto_num, sim_measure, bert_measure, agg_measure, num_walks, walk_mode, path_length, split, data_folder, exp_lambda, device, init_scheme = None):
         super(HeteroRGCN, self).__init__()
 
+        self.init_scheme = init_scheme
+        init = resolve_init_spec(init_scheme)
+
         if attention:
-            self.layer1 = AttHeteroRGCNLayer(in_size, hidden_size, G.etypes)
-            self.layer2 = AttHeteroRGCNLayer(hidden_size, out_size, G.etypes)
+            self.layer1 = AttHeteroRGCNLayer(in_size, hidden_size, G.etypes, init_scheme = init_scheme)
+            self.layer2 = AttHeteroRGCNLayer(hidden_size, out_size, G.etypes, init_scheme = init_scheme)
         else:
-            self.layer1 = HeteroRGCNLayer(in_size, hidden_size, G.etypes)
-            self.layer2 = HeteroRGCNLayer(hidden_size, out_size, G.etypes)
-        
+            self.layer1 = HeteroRGCNLayer(in_size, hidden_size, G.etypes, init_scheme = init_scheme)
+            self.layer2 = HeteroRGCNLayer(hidden_size, out_size, G.etypes, init_scheme = init_scheme)
+
         self.w_rels = nn.Parameter(torch.Tensor(len(G.canonical_etypes), out_size))
-        nn.init.xavier_uniform_(self.w_rels, gain=nn.init.calculate_gain('relu'))
+        init['relation'](self.w_rels)
         rel2idx = dict(zip(G.canonical_etypes, list(range(len(G.canonical_etypes)))))
-               
-        self.pred = DistMultPredictor(n_hid = hidden_size, w_rels = self.w_rels, G = G, rel2idx = rel2idx, proto = proto, proto_num = proto_num, sim_measure = sim_measure, bert_measure = bert_measure, agg_measure = agg_measure, num_walks = num_walks, walk_mode = walk_mode, path_length = path_length, split = split, data_folder = data_folder, exp_lambda = exp_lambda, device = device)
+
+        self.pred = DistMultPredictor(n_hid = hidden_size, w_rels = self.w_rels, G = G, rel2idx = rel2idx, proto = proto, proto_num = proto_num, sim_measure = sim_measure, bert_measure = bert_measure, agg_measure = agg_measure, num_walks = num_walks, walk_mode = walk_mode, path_length = path_length, split = split, data_folder = data_folder, exp_lambda = exp_lambda, device = device, init_scheme = init_scheme)
         self.attention = attention
         
         self.hidden_size = hidden_size

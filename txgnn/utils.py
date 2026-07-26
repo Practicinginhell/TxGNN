@@ -21,7 +21,9 @@ from tqdm.auto import tqdm
 from random import choice
 from collections import Counter
 import requests
-from zipfile import ZipFile 
+from zipfile import ZipFile
+
+from .init_schemes import resolve_init_spec
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -1068,11 +1070,12 @@ def create_dgl_graph(df_train, df):
 
     return g
 
-def initialize_node_embedding(g, n_inp):
-    # initialize embedding xavier uniform
+def initialize_node_embedding(g, n_inp, init_scheme = None):
+    # initialize the frozen input features, xavier uniform unless a scheme says otherwise
+    emb_init = resolve_init_spec(init_scheme)['embedding']
     for ntype in g.ntypes:
         emb = nn.Parameter(torch.Tensor(g.number_of_nodes(ntype), n_inp), requires_grad = False)
-        nn.init.xavier_uniform_(emb)
+        emb_init(emb)
         g.nodes[ntype].data['inp'] = emb
     return g
 

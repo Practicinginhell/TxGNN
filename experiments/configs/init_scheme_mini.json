@@ -1,0 +1,80 @@
+{
+  "name": "init_scheme_mini",
+  "results_dir": "experiments/results/init_scheme_mini",
+  "seeds": [1, 2, 3],
+  "metric": "test_macro_auroc",
+  "baseline": "xavier_uniform (repo default)",
+  "base": {
+    "data": "./data_mini",
+    "split": "complex_disease",
+    "split_seed": 42,
+    "device": null,
+    "model": {
+      "n_hid": 32,
+      "n_inp": 32,
+      "n_out": 32,
+      "proto": true,
+      "proto_num": 3,
+      "attention": false,
+      "sim_measure": "all_nodes_profile",
+      "agg_measure": "rarity",
+      "num_walks": 10,
+      "path_length": 2,
+      "init_scheme": null
+    },
+    "pretrain": {
+      "n_epoch": 1,
+      "learning_rate": 0.001,
+      "batch_size": 1024,
+      "train_print_per_n": 100
+    },
+    "finetune": {
+      "n_epoch": 30,
+      "learning_rate": 0.0005,
+      "train_print_per_n": 100,
+      "valid_per_n": 5
+    }
+  },
+  "variants": [
+    {
+      "name": "xavier_uniform (repo default)",
+      "overrides": {"model.init_scheme": null}
+    },
+    {
+      "name": "xavier_uniform (everywhere)",
+      "overrides": {"model.init_scheme": "xavier_uniform"}
+    },
+    {
+      "name": "xavier_normal",
+      "overrides": {"model.init_scheme": "xavier_normal"}
+    },
+    {
+      "name": "kaiming_uniform (leaky_relu)",
+      "overrides": {
+        "model.init_scheme": {"name": "kaiming_uniform", "nonlinearity": "leaky_relu"}
+      }
+    },
+    {
+      "name": "kaiming_normal (leaky_relu)",
+      "overrides": {
+        "model.init_scheme": {"name": "kaiming_normal", "nonlinearity": "leaky_relu"}
+      }
+    },
+    {
+      "name": "orthogonal",
+      "overrides": {"model.init_scheme": {"name": "orthogonal", "gain": "relu"}}
+    },
+    {
+      "name": "normal std=0.02",
+      "overrides": {"model.init_scheme": {"name": "normal", "std": 0.02}}
+    },
+    {
+      "name": "kaiming layers only",
+      "overrides": {"model.init_scheme": {"layer": "kaiming_uniform"}}
+    },
+    {
+      "name": "orthogonal embeddings only",
+      "overrides": {"model.init_scheme": {"embedding": "orthogonal"}}
+    }
+  ]
+}

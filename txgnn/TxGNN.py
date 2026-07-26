@@ -19,6 +19,7 @@ from torch.utils import data
 
 from .model import *
 from .utils import *
+from .init_schemes import resolve_init_spec, describe as describe_init_scheme
 
 from .TxData import TxData
 from .TxEval import TxEval
@@ -77,14 +78,19 @@ class TxGNN:
                                exp_lambda = 0.7,
                                num_walks = 200,
                                walk_mode = 'bit',
-                               path_length = 2):
-        
+                               path_length = 2,
+                               init_scheme = None):
+
         if self.no_kg and proto:
             print('Ablation study on No-KG. No proto learning is used...')
             proto = False
-        
+
+        # fail here rather than halfway through building the model
+        resolve_init_spec(init_scheme)
+        print('Weight initialization: %s' % describe_init_scheme(init_scheme))
+
         self.G = self.G.to('cpu')
-        self.G = initialize_node_embedding(self.G, n_inp)
+        self.G = initialize_node_embedding(self.G, n_inp, init_scheme = init_scheme)
         self.g_valid_pos, self.g_valid_neg = evaluate_graph_construct(self.df_valid, self.G, 'fix_dst', 1, self.device)
         self.g_test_pos, self.g_test_neg = evaluate_graph_construct(self.df_test, self.G, 'fix_dst', 1, self.device)
 
@@ -99,7 +105,8 @@ class TxGNN:
                        'agg_measure': agg_measure,
                        'num_walks': num_walks,
                        'walk_mode': walk_mode,
-                       'path_length': path_length
+                       'path_length': path_length,
+                       'init_scheme': init_scheme
                       }
 
         self.model = HeteroRGCN(self.G,
@@ -118,8 +125,9 @@ class TxGNN:
                    split = self.split,
                    data_folder = self.data_folder,
                    exp_lambda = exp_lambda,
-                   device = self.device
-                  ).to(self.device)    
+                   device = self.device,
+                   init_scheme = init_scheme
+                  ).to(self.device)
         self.best_model = self.model
         
     def pretrain(self, n_epoch = 1, learning_rate = 1e-3, batch_size = 1024, train_print_per_n = 20, sweep_wandb = None):
@@ -215,8 +223,10 @@ class TxGNN:
 
         self.G = self.G.to(self.device)
         neg_sampler = Full_Graph_NegSampler(self.G, 1, 'fix_dst', self.device)
-        torch.nn.init.xavier_uniform(self.model.w_rels) # reinitialize decoder
-        
+        # reinitialize decoder, with whatever scheme the model was built with
+        init_scheme = (self.config or {}).get('init_scheme')
+        resolve_init_spec(init_scheme)['relation'](self.model.w_rels)
+
         optimizer = torch.optim.AdamW(self.model.parameters(), lr = learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', 0.8)
         
@@ -340,8 +350,18 @@ class TxGNN:
         print('----- AUPRC Performance in Each Relation -----')
         print_dict(auprc_rel, dd_only = False)
         print('----------------------------------------------')
-        
-        
+
+        # returned so callers (e.g. the experiment runner) do not have to scrape stdout
+        return {'test_loss': loss,
+                'test_micro_auroc': micro_auroc,
+                'test_micro_auprc': micro_auprc,
+                'test_macro_auroc': macro_auroc,
+                'test_macro_auprc': macro_auprc,
+                'best_valid_macro_auroc': best_val_acc,
+                'test_auroc_per_relation': auroc_rel,
+                'test_auprc_per_relation': auprc_rel}
+
+
     def save_model(self, path):
         if not os.path.exists(path):
             os.mkdir(path)
