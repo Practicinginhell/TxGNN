@@ -36,9 +36,10 @@ pip install -e . --no-deps   # --no-deps keeps pandas at 1.3.x, because the code
 
 ### Quick start: a mini KG for fast testing
 
-The full knowledge graph is 8.1M edges (~945 MB) and a complete run takes hours. To check
-that everything works first, `make_mini_kg.py` carves out a smaller subgraph that keeps the
-same schema and relation vocabulary, so it exercises the same code paths in about a minute.
+The full knowledge graph is 4.05M edges stored as 8.1M rows, and a complete run takes hours.
+The three files total 1.4 GB to download (`kg.csv` 982 MB, `edges.csv` 387 MB, `node.csv`
+9 MB). To check that everything works first, `make_mini_kg.py` carves out a smaller subgraph
+with the same column layout, so it exercises the same code paths in about a minute.
 
 ```bash
 # 1. download the full KG once, then build the subset
@@ -52,15 +53,28 @@ python make_mini_kg.py --src data_full/kg.csv --out data_mini --n-diseases 400 -
 
 |  | Full KG | Mini KG |
 | --- | --- | --- |
-| Edges | 8,100,498 | 314,594 |
-| Size | 945 MB | 38 MB |
-| Relations | 30 | 16 |
-| Node types | 5 | 5 (all kept) |
+| Rows in `kg.csv` | 8,100,498 | 400,768 |
+| Undirected edges | 4,050,064 | 200,247 |
+| Size of `kg.csv` | 982 MB | 49 MB |
+| Relations | 30 | 30 |
+| Node types | 10 | 10 |
+| Nodes | 129,375 | 16,459 |
 
-The subset is built so it stays valid for the pipeline: every edge is kept in **both
-directions** (`preprocess_kg` de-duplicates by orientation), drug-disease edges are never
-downsampled since they are the prediction task, and enough treated diseases are kept for the
-5% test split to be non-empty. Tune with `--n-diseases`, `--max-ppi`, `--max-per-rel`.
+Rows are not edges. `kg.csv` stores every edge twice, once per direction, which
+`preprocess_kg` relies on. The doubling is not exact because the file also holds duplicate
+rows, 370 in the full KG and 274 in the mini.
+
+The mini KG keeps the full schema, all 10 node types and all 30 relations, but it is far
+sparser than the full graph. Five types (`anatomy`, `pathway`, `biological_process`,
+`cellular_component`, `molecular_function`) attach only through `gene/protein` and
+`exposure`, never directly to a drug or a disease, so a bounded second hop reaches them.
+Pass `--max-new-per-type 0` for the older one-hop subset, which drops those five and leaves
+16 relations. Either way, use it to check that code runs, not to draw conclusions.
+
+The invariants the pipeline needs are preserved: edges stay in both directions, drug-disease
+edges are never downsampled since they are the task, and enough treated diseases survive for
+a non-empty 5% test split, 1,957 of them here. Tune with `--n-diseases`, `--max-ppi`,
+`--max-per-rel`, `--max-new-per-type`.
 
 ### Running the pipeline
 
@@ -68,7 +82,7 @@ downsampled since they are the prediction task, and enough treated diseases are 
 evaluation, saving the best checkpoint (highest validation macro-AUROC) before evaluating.
 
 ```bash
-# fast smoke test on the mini KG (~1 min on CPU)
+# fast smoke test on the mini KG (~80 s on CPU)
 python test_mini_pipeline.py --data ./data_mini --device cpu \
     --n-hid 32 --n-inp 32 --n-out 32 --num-walks 10 \
     --pretrain-epochs 1 --finetune-epochs 2 --valid-per-n 1
@@ -77,9 +91,11 @@ python test_mini_pipeline.py --data ./data_mini --device cpu \
 python test_mini_pipeline.py
 ```
 
-Defaults match `reproduce/train.py`: `n_hid=n_inp=n_out=100`, `proto_num=3`,
-`num_walks=200`, 2 pretrain epochs, 500 finetune epochs, `valid_per_n=20`. Every value is a
-CLI flag, so `--finetune-epochs 50` gives a shorter run. The device is auto-detected.
+Defaults follow `reproduce/train.py`: `n_hid=n_inp=n_out=100`, `proto_num=3`, 500 finetune
+epochs, `valid_per_n=20`. Pretraining is the exception, 2 epochs here against 1 there.
+`num_walks=200` is inert under the default `sim_measure='all_nodes_profile'`, which does not
+walk. Every value is a CLI flag, so `--finetune-epochs 50` gives a shorter run. The device is
+auto-detected.
 
 ### Querying a trained model
 
@@ -129,7 +145,7 @@ seconds.
 
 ```bash
 python -m unittest discover -s tests -v          # fast suite, ~8 seconds
-TXGNN_RUN_SLOW=1 python -m unittest discover -s tests   # adds the real pipeline, ~70 seconds
+TXGNN_RUN_SLOW=1 python -m unittest discover -s tests   # adds the real pipeline, ~95 seconds
 ```
 
 The slow tests need `data_mini/` to exist and are skipped otherwise. No test framework is

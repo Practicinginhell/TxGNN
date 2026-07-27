@@ -133,16 +133,19 @@ class TestGraphInvariants(MiniKGTestBase):
             undirected_keys(self.kg).issubset(undirected_keys(self.full)))
 
     def test_enough_treated_diseases_for_a_nonempty_test_split(self):
-        """complex_disease_fold() gives the test bucket 5% of treated diseases.
+        """complex_disease_fold() gives the test bucket whatever np.split leaves.
 
-        With too few diseases the test split rounds down to zero and evaluation
-        silently has nothing to score.
+        The second cut is at int((frac[0] + frac[1]) * n), so the bucket holds
+        n - int(0.95 * n), not int(0.05 * n). The two disagree whenever 0.95 * n
+        has a fractional part: at n = 1957 the real bucket is 98, not 97.
+        Evaluation has nothing to score if the bucket comes out empty.
         """
         dd = self.kg[self.kg.relation.isin(DD_RELS)]
         n_diseases = dd[dd.y_type == "disease"].y_index.nunique()
+        n_test = n_diseases - int((0.83125 + 0.11875) * n_diseases)
         self.assertGreaterEqual(
-            int(n_diseases * 0.05), 1,
-            f"only {n_diseases} treated diseases, 5% test split would be empty")
+            n_test, 1,
+            f"only {n_diseases} treated diseases, the test split would be empty")
 
     def test_all_node_types_survive(self):
         types = set(self.kg.x_type) | set(self.kg.y_type)

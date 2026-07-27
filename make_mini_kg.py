@@ -1,10 +1,21 @@
 """
 Build a small, self-consistent subset of the TxGNN knowledge graph for fast testing.
 
-Why this exists: the full KG is ~8M edges / ~600MB, so a single end-to-end run takes
-hours. This script carves out a connectivity-aware subgraph that keeps the same schema
-and relation vocabulary, so the full pipeline (preprocess -> split -> DGL graph ->
-pretrain -> finetune -> evaluate) exercises the same code paths in ~minutes.
+Why this exists: the full KG is 4.05M edges stored as 8.1M rows in a 982 MB kg.csv, so
+a single end-to-end run takes hours. This script carves out a connectivity-aware
+subgraph that keeps the same column schema, so the full pipeline (preprocess -> split
+-> DGL graph -> pretrain -> finetune -> evaluate) exercises the same code paths in
+~minutes.
+
+The subset keeps all 10 node types and all 30 relations. Five of those types (anatomy,
+pathway, biological_process, cellular_component and molecular_function) attach only
+through gene/protein and exposure, never directly to a drug or a disease, so the one-hop
+expansion from the seed diseases misses them completely. Step 3b pulls in a bounded
+sample of each, sized by --max-new-per-type. Pass 0 for the older one-hop behaviour,
+which yields 5 node types and 16 relations.
+
+The graph is still far sparser than the full KG, so it is for smoke testing rather than
+for measuring anything.
 
 Design constraints discovered from txgnn/utils.py:
   * preprocess_kg() de-duplicates each relation to ONE orientation via
@@ -66,13 +77,19 @@ def main():
     ap.add_argument("--out", default="data_mini")
     ap.add_argument("--n-diseases", type=int, default=400,
                     help="number of treated diseases to seed the subgraph with")
-    # Caps are applied BEFORE the both-directions repair in step 6, so the final
-    # per-relation count comes out at roughly 2x the cap once mirror edges are added
-    # back. 20000 yields about 37k-40k edges for that relation.
+    # Caps count rows, not edges, and are applied BEFORE the both-directions repair in
+    # step 6, so the final per-relation row count comes out at roughly 2x the cap once
+    # mirror rows are added back. 20000 yields about 37k-40k rows for that relation.
     ap.add_argument("--max-ppi", type=int, default=20000,
-                    help="cap on protein_protein edges before mirroring (final count is ~2x)")
+                    help="cap on protein_protein rows before mirroring (final count is ~2x)")
     ap.add_argument("--max-per-rel", type=int, default=20000,
                     help="cap on any other single relation before mirroring (final count is ~2x)")
+    # anatomy, pathway and the three Gene Ontology types attach only through
+    # gene/protein and exposure, never directly to a drug or a disease, so the
+    # one-hop expansion in step 3 can never reach them. See step 3b.
+    ap.add_argument("--max-new-per-type", type=int, default=300,
+                    help="nodes to pull in per node type that sits two hops from the seed "
+                         "diseases; 0 keeps the one-hop behaviour and drops those types")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -109,10 +126,38 @@ def main():
     neighbours = set(one_hop.x_index.unique()) | set(one_hop.y_index.unique())
     print(f"  node set after 1-hop: {len(neighbours):,}")
 
+    # ---- 3b. second hop, for the types that are never adjacent to the core -----
+    # Five node types (anatomy, pathway, biological_process, cellular_component,
+    # molecular_function) reach the graph only through gene/protein and exposure.
+    # A one-hop expansion from diseases and drugs cannot reach them at all, so
+    # they would drop out entirely. Pull in a bounded number of each.
+    present = set(one_hop.x_type) | set(one_hop.y_type)
+    inside_x = kg.x_index.isin(neighbours)
+    inside_y = kg.y_index.isin(neighbours)
+    crossing = kg[inside_x != inside_y]
+    on_x = inside_x[crossing.index].values
+    outside = pd.DataFrame({
+        "idx": np.where(on_x, crossing.y_index, crossing.x_index),
+        "type": np.where(on_x, crossing.y_type, crossing.x_type),
+    }).drop_duplicates()
+
+    added, gained = set(), []
+    for node_type, grp in outside.groupby("type"):
+        if node_type in present or args.max_new_per_type < 1:
+            continue
+        n = min(args.max_new_per_type, len(grp))
+        added.update(rng.choice(grp.idx.values, size=n, replace=False).tolist())
+        gained.append(node_type)
+    if added:
+        neighbours |= added
+        print(f"  2-hop pulled in {len(added):,} nodes across {len(gained)} new types: "
+              f"{', '.join(gained)}")
+        print(f"  node set after 2-hop: {len(neighbours):,}")
+
     # ---- 4. keep edges whose BOTH endpoints are in the node set ---------------
     both_in = kg.x_index.isin(neighbours) & kg.y_index.isin(neighbours)
     sub = kg[both_in]
-    print(f"  edges with both endpoints kept: {len(sub):,}")
+    print(f"  rows with both endpoints kept: {len(sub):,}")
 
     # ---- 5. cap the huge relations so the graph stays small -------------------
     pieces = []
@@ -130,13 +175,17 @@ def main():
     mask = kg.index.isin(sub.index)
     sub = symmetric_keep(kg, mask)
 
-    # drop relations that ended up with a single orientation only (would break
-    # preprocess_kg's undirected de-duplication)
+    # Drop relations that ended up with a single orientation. preprocess_kg keeps one
+    # orientation of a heterogeneous relation via `d_off[d_off.x_type ==
+    # d_off.x_type.iloc[0]]`, which matches every row when the mirror is missing, so
+    # the de-duplication silently becomes a no-op. A heterogeneous relation holding
+    # both orientations has two distinct x_types; a homogeneous one has a single
+    # x_type equal to its y_type, and one orientation is normal there.
     ok_rels = []
     for rel, grp in sub.groupby("relation"):
-        if grp.x_type.nunique() == 1 and grp.y_type.nunique() == 1 and grp.x_type.iloc[0] == grp.y_type.iloc[0]:
-            ok_rels.append(rel)  # homogeneous, fine
-        elif len(grp) >= 2:
+        homogeneous = (grp.x_type.nunique() == 1 and grp.y_type.nunique() == 1
+                       and grp.x_type.iloc[0] == grp.y_type.iloc[0])
+        if homogeneous or grp.x_type.nunique() == 2:
             ok_rels.append(rel)
     sub = sub[sub.relation.isin(ok_rels)]
 
@@ -146,13 +195,24 @@ def main():
     # ---- 7. report -------------------------------------------------------------
     dd_final = sub[sub.relation.isin(DD_RELS)]
     n_dis = dd_final[dd_final.y_type == "disease"].y_index.nunique()
+    # Rows are not edges: every edge is stored once per direction. Canonicalise each
+    # row to an unordered endpoint pair to count the edges behind them.
+    lo = np.minimum(sub.x_index.values, sub.y_index.values)
+    hi = np.maximum(sub.x_index.values, sub.y_index.values)
+    n_edges = len(pd.DataFrame({"rel": sub.relation.values, "lo": lo, "hi": hi})
+                  .drop_duplicates())
+    # complex_disease_fold cuts the shuffled disease list with np.split at
+    # int((frac[0] + frac[1]) * n), so the test bucket gets whatever is left over.
+    # Mirror that sum literally: 0.83125 + 0.11875 is 0.9500000000000001, not 0.95.
+    n_test = n_dis - int((0.83125 + 0.11875) * n_dis)
     print("\n=== mini KG written ===")
     print(f"  path       : {out_path} ({os.path.getsize(out_path)/1e6:.1f} MB)")
-    print(f"  edges      : {len(sub):,}  (from {len(kg):,})")
+    print(f"  rows       : {len(sub):,}  (from {len(kg):,})")
+    print(f"  edges      : {n_edges:,}  (each stored in both directions)")
     print(f"  relations  : {sub.relation.nunique()} (from {kg.relation.nunique()})")
     print(f"  node types : {sorted(set(sub.x_type.unique()) | set(sub.y_type.unique()))}")
-    print(f"  treated diseases : {n_dis}  -> ~{int(n_dis*0.05)} land in the test split")
-    print("\n  edges per relation:")
+    print(f"  treated diseases : {n_dis}  -> {n_test} land in the test split")
+    print("\n  rows per relation:")
     for rel, cnt in sub.relation.value_counts().items():
         print(f"    {rel:35s} {cnt:>8,}")
 
